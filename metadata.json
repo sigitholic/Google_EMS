@@ -1,0 +1,6 @@
+{
+  "name": "OptiCore Multi-Vendor OLT EMS & NMS",
+  "description": "Platform Element Management System (EMS) dan Network Management System (NMS) terpadu untuk monitoring jaringan FTTH/GPON, auto-discovery ONU, analisis redaman optik, dan konfigurasi OLT multi-vendor (ZTE, Huawei, FiberHome, Nokia).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
