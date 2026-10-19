@@ -565,6 +565,8 @@ export default function App() {
             onus={onus}
             unconfiguredOnus={unconfiguredOnus}
             alarms={alarms}
+            selectedOltId={selectedOltId}
+            onSelectOlt={setSelectedOltId}
             onNavigateOltEms={(oltId) => {
               setSelectedOltId(oltId);
               setActiveTab('olt-ems');

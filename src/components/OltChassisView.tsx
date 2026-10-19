@@ -1,14 +1,10 @@
 import React, { useState } from 'react';
 import { OltNode, OnuDevice, PonPort } from '../types/network';
+import { HealthDashboard } from './HealthDashboard';
 import {
-  Server,
-  Cpu,
-  Thermometer,
-  Activity,
   Terminal,
   RefreshCw,
   Power,
-  Sliders,
   ArrowUpRight,
 } from 'lucide-react';
 
@@ -66,9 +62,6 @@ export const OltChassisView: React.FC<OltChassisViewProps> = ({
     activeOlt.ponPorts.find((p) => p.id === selectedPonPortId) ||
     activeOlt.ponPorts[0];
 
-  const oltOnus = onus.filter((u) => u.oltId === activeOlt.id);
-  const onlineOnuCount = oltOnus.filter((u) => u.status === 'Online').length;
-
   return (
     <div className="space-y-6">
       {/* Multi-Vendor OLT Selector Bar */}
@@ -78,7 +71,7 @@ export const OltChassisView: React.FC<OltChassisViewProps> = ({
             Manajemen Elemen OLT Multi-Vendor (EMS)
           </h1>
           <p className="text-sm text-slate-400 mt-1">
-            Inspeksi sasis fisik 19-inci, modul kartu GPON/XG-PON, serta telemetri optik SFP per port PON lintas vendor.
+            Inspeksi sasis fisik 19-inci, grafik telemetri CPU/Memori/Throughput real-time, serta diagnostik optik SFP per port PON.
           </p>
         </div>
 
@@ -103,9 +96,9 @@ export const OltChassisView: React.FC<OltChassisViewProps> = ({
         </div>
       </div>
 
-      {/* Selected OLT Header Specification Strip */}
+      {/* Selected OLT Action Header */}
       <div className="bg-slate-900/70 border border-slate-800 rounded-lg p-5">
-        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 pb-4 border-b border-slate-800">
+        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
           <div>
             <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
               <span className="font-semibold text-sky-400">{activeOlt.vendor}</span>
@@ -135,7 +128,11 @@ export const OltChassisView: React.FC<OltChassisViewProps> = ({
               onClick={() => handleTriggerSync(activeOlt.id)}
               className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors whitespace-nowrap shrink-0"
             >
-              <RefreshCw className={`w-3.5 h-3.5 ${syncingId === activeOlt.id ? 'animate-spin text-sky-400' : ''}`} />
+              <RefreshCw
+                className={`w-3.5 h-3.5 ${
+                  syncingId === activeOlt.id ? 'animate-spin text-sky-400' : ''
+                }`}
+              />
               Sinkronisasi MIB / OMCI
             </button>
             <button
@@ -147,64 +144,15 @@ export const OltChassisView: React.FC<OltChassisViewProps> = ({
             </button>
           </div>
         </div>
-
-        {/* 6-Column Telemetry Strip */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 pt-4">
-          <div>
-            <div className="text-xs text-slate-400">Status Operasional</div>
-            <div
-              className={`text-sm font-semibold mt-1 ${
-                activeOlt.status === 'Normal'
-                  ? 'text-emerald-400'
-                  : activeOlt.status === 'Warning'
-                  ? 'text-amber-400'
-                  : 'text-rose-400'
-              }`}
-            >
-              {activeOlt.status === 'Normal'
-                ? 'Normal (Aktif)'
-                : activeOlt.status === 'Warning'
-                ? 'Peringatan (Degradasi)'
-                : 'Kritis (Gangguan PON)'}
-            </div>
-          </div>
-
-          <div>
-            <div className="text-xs text-slate-400">Uptime Sistem</div>
-            <div className="text-sm font-mono tabular-nums text-slate-100 mt-1">
-              {activeOlt.uptime}
-            </div>
-          </div>
-
-          <div>
-            <div className="text-xs text-slate-400">Beban CPU / Memori</div>
-            <div className="text-sm font-mono tabular-nums text-slate-100 mt-1">
-              {activeOlt.cpuLoad}% / {activeOlt.memoryLoad}%
-            </div>
-          </div>
-
-          <div>
-            <div className="text-xs text-slate-400">Suhu Sasis OLT</div>
-            <div className="text-sm font-mono tabular-nums text-slate-100 mt-1">
-              {activeOlt.chassisTempC.toFixed(1)} °C
-            </div>
-          </div>
-
-          <div>
-            <div className="text-xs text-slate-400">Trafik Uplink / Downlink</div>
-            <div className="text-sm font-mono tabular-nums text-slate-100 mt-1">
-              {activeOlt.uplinkThroughputGbps.toFixed(2)}G / {activeOlt.downlinkThroughputGbps.toFixed(2)}G
-            </div>
-          </div>
-
-          <div>
-            <div className="text-xs text-slate-400">ONU Terdaftar (Online)</div>
-            <div className="text-sm font-mono tabular-nums text-slate-100 mt-1">
-              {onlineOnuCount} / {oltOnus.length} Sampel ONU
-            </div>
-          </div>
-        </div>
       </div>
+
+      {/* Real-Time Recharts Health Dashboard (Replaces Static Status Indicators) */}
+      <HealthDashboard
+        olts={olts}
+        selectedOltId={activeOlt.id}
+        onSelectOlt={onSelectOlt}
+        compact
+      />
 
       {/* Main Split: Left Hardware Chassis Visualizer | Right Slot & PON Transceiver Inspector */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
@@ -392,7 +340,9 @@ export const OltChassisView: React.FC<OltChassisViewProps> = ({
               {/* Optical Telemetry Grid */}
               <div className="grid grid-cols-2 gap-3.5 my-4">
                 <div className="p-3.5 bg-slate-950 border border-slate-800 rounded-lg">
-                  <div className="text-xs text-slate-400">Daya Pancar Laser OLT (Tx)</div>
+                  <div className="text-xs text-slate-400">
+                    Daya Pancar Laser OLT (Tx)
+                  </div>
                   <div className="text-lg font-mono tabular-nums font-semibold text-emerald-400 mt-1">
                     +{activePonPort.txPowerDbm.toFixed(2)} dBm
                   </div>
@@ -402,7 +352,9 @@ export const OltChassisView: React.FC<OltChassisViewProps> = ({
                 </div>
 
                 <div className="p-3.5 bg-slate-950 border border-slate-800 rounded-lg">
-                  <div className="text-xs text-slate-400">Rasio Splitter & Kapasitas</div>
+                  <div className="text-xs text-slate-400">
+                    Rasio Splitter & Kapasitas
+                  </div>
                   <div className="text-lg font-mono tabular-nums font-semibold text-slate-100 mt-1">
                     {activePonPort.activeOnus} / {activePonPort.totalOnus} ONU
                   </div>
@@ -412,9 +364,12 @@ export const OltChassisView: React.FC<OltChassisViewProps> = ({
                 </div>
 
                 <div className="p-3.5 bg-slate-950 border border-slate-800 rounded-lg">
-                  <div className="text-xs text-slate-400">Suhu & Arus Bias Laser SFP</div>
+                  <div className="text-xs text-slate-400">
+                    Suhu & Arus Bias Laser SFP
+                  </div>
                   <div className="text-base font-mono tabular-nums font-semibold text-slate-100 mt-1">
-                    {activePonPort.temperatureC.toFixed(1)} °C · {activePonPort.biasCurrentMa.toFixed(1)} mA
+                    {activePonPort.temperatureC.toFixed(1)} °C ·{' '}
+                    {activePonPort.biasCurrentMa.toFixed(1)} mA
                   </div>
                   <div className="text-xs text-slate-400 mt-0.5">
                     Ambang Normal: &lt; 65 °C · &lt; 45 mA
@@ -422,9 +377,12 @@ export const OltChassisView: React.FC<OltChassisViewProps> = ({
                 </div>
 
                 <div className="p-3.5 bg-slate-950 border border-slate-800 rounded-lg">
-                  <div className="text-xs text-slate-400">Throughput Port PON Saat Ini</div>
+                  <div className="text-xs text-slate-400">
+                    Throughput Port PON Saat Ini
+                  </div>
                   <div className="text-base font-mono tabular-nums font-semibold text-sky-400 mt-1">
-                    ↓ {activePonPort.downlinkTrafficMbps.toFixed(1)}M / ↑ {activePonPort.uplinkTrafficMbps.toFixed(1)}M
+                    ↓ {activePonPort.downlinkTrafficMbps.toFixed(1)}M / ↑{' '}
+                    {activePonPort.uplinkTrafficMbps.toFixed(1)}M
                   </div>
                   <div className="text-xs text-slate-400 mt-0.5">
                     Kapasitas GPON: ↓ 2.488 Gbps / ↑ 1.244 Gbps
@@ -451,9 +409,12 @@ export const OltChassisView: React.FC<OltChassisViewProps> = ({
                     </span>
                   </div>
                   <div className="flex justify-between text-slate-400">
-                    <span>Redaman Splitter {activePonPort.splitRatio} (ODC + ODP)</span>
+                    <span>
+                      Redaman Splitter {activePonPort.splitRatio} (ODC + ODP)
+                    </span>
                     <span className="font-mono tabular-nums">
-                      -{activePonPort.splitRatio === '1:64' ? '20.50' : '17.20'} dB
+                      -{activePonPort.splitRatio === '1:64' ? '20.50' : '17.20'}{' '}
+                      dB
                     </span>
                   </div>
                   <div className="flex justify-between text-slate-400">

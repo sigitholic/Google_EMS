@@ -6,13 +6,14 @@ import {
   NetworkAlarm,
   AlarmSeverity,
 } from '../types/network';
+import { HealthDashboard } from './HealthDashboard';
 import {
   ArrowUpRight,
   Check,
   Trash2,
   Download,
   Terminal,
-  Plus,
+  Activity,
 } from 'lucide-react';
 
 interface NmsOverviewViewProps {
@@ -20,6 +21,8 @@ interface NmsOverviewViewProps {
   onus: OnuDevice[];
   unconfiguredOnus: UnconfiguredOnu[];
   alarms: NetworkAlarm[];
+  selectedOltId: string;
+  onSelectOlt: (oltId: string) => void;
   onNavigateOltEms: (oltId: string) => void;
   onNavigateProvisioning: () => void;
   onNavigateCli: (oltId: string) => void;
@@ -32,6 +35,8 @@ export const NmsOverviewView: React.FC<NmsOverviewViewProps> = ({
   onus,
   unconfiguredOnus,
   alarms,
+  selectedOltId,
+  onSelectOlt,
   onNavigateOltEms,
   onNavigateProvisioning,
   onNavigateCli,
@@ -108,7 +113,7 @@ export const NmsOverviewView: React.FC<NmsOverviewViewProps> = ({
             Pusat Kendali Jaringan FTTH & OLT Multi-Vendor (NOC NMS/EMS)
           </h1>
           <p className="text-sm text-slate-400 mt-1">
-            Pemantauan terpadu kinerja elemen OLT ZTE, Huawei, FiberHome, dan Nokia beserta korelasi alarm jaringan akses optik.
+            Pemantauan terpadu kinerja elemen OLT ZTE, Huawei, FiberHome, dan Nokia beserta grafik tren CPU/Memori/Throughput real-time.
           </p>
         </div>
 
@@ -181,19 +186,26 @@ export const NmsOverviewView: React.FC<NmsOverviewViewProps> = ({
         </div>
       </div>
 
+      {/* Interactive Recharts Health Dashboard for Selected OLT */}
+      <HealthDashboard
+        olts={olts}
+        selectedOltId={selectedOltId}
+        onSelectOlt={onSelectOlt}
+      />
+
       {/* Multi-Vendor OLT Inventory & Health Matrix */}
       <div className="bg-slate-900/70 border border-slate-800 rounded-lg p-5 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-4 border-b border-slate-800">
           <div>
             <h2 className="text-sm font-semibold text-slate-100">
-              Matriks Kesehatan Perangkat OLT Multi-Vendor (EMS Element Matrix)
+              Matriks Perangkat OLT Multi-Vendor (Klik Grafik atau Inspeksi Sasis)
             </h2>
             <p className="text-xs text-slate-400 mt-0.5">
-              Klik Inspeksi Sasis untuk membuka konfigurasi slot/port PON atau tombol CLI untuk membuka konsol terminal perangkat.
+              Pilih tombol Pantau Grafik untuk menampilkan tren CPU, memori, dan throughput OLT tersebut pada Health Dashboard di atas.
             </p>
           </div>
           <span className="text-xs font-mono tabular-nums text-slate-400">
-            Polling SNMPv3 + Telemetry NETCONF: Interval 15s
+            Polling SNMPv3 + Telemetry NETCONF: Interval Aktif
           </span>
         </div>
 
@@ -204,8 +216,8 @@ export const NmsOverviewView: React.FC<NmsOverviewViewProps> = ({
                 <th className="py-2.5 pr-4">Hostname OLT & Lokasi POP</th>
                 <th className="py-2.5 px-3">Vendor & Sasis</th>
                 <th className="py-2.5 px-3">IP Manajemen</th>
-                <th className="py-2.5 px-3">Status EMS</th>
-                <th className="py-2.5 px-3 text-right">CPU / Mem / Suhu</th>
+                <th className="py-2.5 px-3">Protokol Manajemen</th>
+                <th className="py-2.5 px-3 text-right">Baseline CPU / RAM</th>
                 <th className="py-2.5 px-3 text-right">ONT Aktif</th>
                 <th className="py-2.5 px-3 text-right">Throughput</th>
                 <th className="py-2.5 pl-3 text-right">Tindakan EMS</th>
@@ -213,6 +225,7 @@ export const NmsOverviewView: React.FC<NmsOverviewViewProps> = ({
             </thead>
             <tbody className="divide-y divide-slate-800/70 text-xs">
               {olts.map((olt) => {
+                const isSelectedForChart = olt.id === selectedOltId;
                 const activeOnuSum = olt.ponPorts.reduce(
                   (s, p) => s + p.activeOnus,
                   0
@@ -224,7 +237,11 @@ export const NmsOverviewView: React.FC<NmsOverviewViewProps> = ({
                 return (
                   <tr
                     key={olt.id}
-                    className="hover:bg-slate-800/40 transition-colors"
+                    className={`transition-colors ${
+                      isSelectedForChart
+                        ? 'bg-sky-950/25 hover:bg-sky-950/40'
+                        : 'hover:bg-slate-800/40'
+                    }`}
                   >
                     <td className="py-3.5 pr-4">
                       <div className="font-semibold text-slate-100">
@@ -252,23 +269,11 @@ export const NmsOverviewView: React.FC<NmsOverviewViewProps> = ({
                     </td>
 
                     <td className="py-3.5 px-3">
-                      <div
-                        className={`font-semibold ${
-                          olt.status === 'Normal'
-                            ? 'text-emerald-400'
-                            : olt.status === 'Warning'
-                            ? 'text-amber-400'
-                            : 'text-rose-400'
-                        }`}
-                      >
-                        {olt.status === 'Normal'
-                          ? 'Normal (Nominal)'
-                          : olt.status === 'Warning'
-                          ? 'Warning (Redaman)'
-                          : 'Critical (PON LOS)'}
+                      <div className="text-slate-200 font-medium">
+                        SNMPv3: {olt.snmpState}
                       </div>
                       <div className="text-slate-400 mt-0.5">
-                        SNMP: {olt.snmpState} · NETCONF: {olt.netconfState}
+                        NETCONF: {olt.netconfState}
                       </div>
                     </td>
 
@@ -300,12 +305,23 @@ export const NmsOverviewView: React.FC<NmsOverviewViewProps> = ({
                     </td>
 
                     <td className="py-3.5 pl-3 text-right">
-                      <div className="inline-flex items-center justify-end gap-2">
+                      <div className="inline-flex items-center justify-end gap-1.5">
+                        <button
+                          onClick={() => onSelectOlt(olt.id)}
+                          className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap ${
+                            isSelectedForChart
+                              ? 'bg-sky-600 text-white border-sky-500'
+                              : 'bg-slate-900 text-slate-300 hover:text-white border-slate-700'
+                          }`}
+                        >
+                          <Activity className="w-3.5 h-3.5" />
+                          {isSelectedForChart ? 'Sedang Dipantau' : 'Pantau Grafik'}
+                        </button>
                         <button
                           onClick={() => onNavigateOltEms(olt.id)}
-                          className="px-3 py-1.5 text-xs font-medium text-slate-100 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors whitespace-nowrap"
+                          className="px-2.5 py-1.5 text-xs font-medium text-slate-100 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors whitespace-nowrap"
                         >
-                          Inspeksi Sasis
+                          Sasis
                         </button>
                         <button
                           onClick={() => onNavigateCli(olt.id)}

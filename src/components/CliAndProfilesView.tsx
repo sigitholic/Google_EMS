@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   OltNode,
   OnuDevice,
@@ -7,14 +7,13 @@ import {
   VendorType,
 } from '../types/network';
 import {
-  Terminal,
   Play,
   Plus,
   Trash2,
   Copy,
   Check,
-  Radio,
   RefreshCw,
+  Wrench,
 } from 'lucide-react';
 
 interface CliAndProfilesViewProps {
@@ -35,6 +34,23 @@ interface ProbePortResult {
   latencyMs: number | null;
   banner: string;
   error?: string;
+}
+
+interface WorkerJobLog {
+  id: string;
+  oltHost: string;
+  jobType: 'PROVISIONING' | 'CLI_EXEC' | 'OPTICAL_POLL' | 'TCP_PROBE';
+  status: 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILED_ROLLBACK';
+  startedAt: string;
+  durationMs: number;
+  summary: string;
+  errorDetail?: string;
+}
+
+interface ScriptDiagnosticIssue {
+  title: string;
+  cause: string;
+  fix: string;
 }
 
 export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
@@ -67,9 +83,17 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
   );
   const [privateIpNotice, setPrivateIpNotice] = useState<string | null>(null);
 
+  // Worker Queue History & Provisioning Script Auditor
+  const [workerJobs, setWorkerJobs] = useState<WorkerJobLog[]>([]);
+  const [scriptToAudit, setScriptToAudit] = useState<string>(
+    `configure terminal\ninterface gpon-olt_1/2/1\nonu 14 type F670V2.1 sn ZTEGC894F11C\nexit\npon-onu-mng gpon-onu_1/2/1:14\nwan-ip 1 mode pppoe username user01 password pass01 vlan-profile VLAN100 host 1`
+  );
+  const [auditVendor, setAuditVendor] = useState<VendorType>('ZTE');
+  const [auditIssues, setAuditIssues] = useState<ScriptDiagnosticIssue[]>([]);
+
   const [terminalLines, setTerminalLines] = useState<string[]>([
     `OptiCore Unified Multi-Vendor Telnet/SSH/NETCONF Proxy Gateway`,
-    `Mode Aktif: Konektor Perangkat OLT Langsung (Real TCP/Telnet Socket Backend)`,
+    `Mode Aktif: Expect State-Machine + Per-OLT Mutex Queue Worker`,
     `Pilih 'Tes Port TCP' untuk menguji keterjangkauan IP OLT atau kirim perintah CLI langsung ke perangkat.`,
   ]);
 
@@ -83,6 +107,41 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
   const [maxMbps, setMaxMbps] = useState(300);
   const [svlan, setSvlan] = useState(1100);
   const [cvlan, setCvlan] = useState(108);
+
+  const fetchWorkerStatus = async () => {
+    try {
+      const res = await fetch('/api/worker/status');
+      const data = await res.json();
+      if (data.history) setWorkerJobs(data.history);
+    } catch {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    fetchWorkerStatus();
+  }, []);
+
+  const handleAuditProvisionScript = async () => {
+    try {
+      const res = await fetch('/api/worker/diagnose-script', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rawScript: scriptToAudit,
+          vendor: auditVendor,
+        }),
+      });
+      const data = await res.json();
+      if (data.issues) setAuditIssues(data.issues);
+    } catch {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    handleAuditProvisionScript();
+  }, [auditVendor]);
 
   const getPromptPrefix = (olt: OltNode) => {
     if (olt.vendor === 'ZTE') return `${olt.name}#`;
@@ -138,6 +197,7 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
           '',
         ]);
       }
+      fetchWorkerStatus();
     } catch (err: any) {
       setTerminalLines((prev) => [
         ...prev,
@@ -157,7 +217,7 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
     setTerminalLines((prev) => [
       ...prev,
       `[LIVE SOCKET ${liveHost}:${livePort}]# ${cmd}`,
-      `Menghubungi socket ${liveHost}:${livePort}...`,
+      `Menghubungi socket ${liveHost}:${livePort} melalui Per-OLT Mutex Queue...`,
     ]);
 
     try {
@@ -181,7 +241,7 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
           username: liveUsername,
           password: livePassword,
           commands: commandsToSend,
-          timeoutMs: 7000,
+          timeoutMs: 8000,
         }),
       });
 
@@ -191,6 +251,13 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
           ...prev,
           `[OK] Respons Perangkat Aktif (${data.host}:${data.port}):`,
           ...String(data.transcript).split('\n'),
+          ...(data.detectedErrors?.length
+            ? [
+                `[PERINGATAN DETEKSI ERROR CLI OLT]: ${data.detectedErrors.join(
+                  ' | '
+                )}`,
+              ]
+            : []),
           '',
         ]);
       } else {
@@ -207,6 +274,7 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
           '',
         ]);
       }
+      fetchWorkerStatus();
     } catch (err: any) {
       setTerminalLines((prev) => [
         ...prev,
@@ -260,7 +328,11 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
         ),
         `-------------------------------------------------------------------------------`,
       ];
-    } else if (cmd.includes('card') || cmd.includes('board') || cmd.includes('slot')) {
+    } else if (
+      cmd.includes('card') ||
+      cmd.includes('board') ||
+      cmd.includes('slot')
+    ) {
       output = [
         `--------------------------------------------------------------------`,
         `Slot  Board Type                  Role               Status   Temp`,
@@ -271,7 +343,11 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
         ),
         `--------------------------------------------------------------------`,
       ];
-    } else if (cmd.includes('mac') || cmd.includes('service-port') || cmd.includes('fdb')) {
+    } else if (
+      cmd.includes('mac') ||
+      cmd.includes('service-port') ||
+      cmd.includes('fdb')
+    ) {
       output = [
         `------------------------------------------------------------------------------`,
         `MAC Address        SVLAN  CVLAN  Port/ONU                 IP PPPoE`,
@@ -310,7 +386,10 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
     if (vendor === 'ZTE') {
       return [
         { label: 'Cek ONT Uncfg', cmd: 'show gpon onu uncfg' },
-        { label: 'Redaman Optik PON', cmd: 'show pon power attenuation gpon-olt_1/1/1' },
+        {
+          label: 'Redaman Optik PON',
+          cmd: 'show pon power attenuation gpon-olt_1/1/1',
+        },
         { label: 'Status Kartu Slot', cmd: 'show card' },
         { label: 'Tabel MAC & VLAN', cmd: 'show mac-address-table vlan' },
         { label: 'Simpan NVRAM', cmd: 'write' },
@@ -386,10 +465,10 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-5 border-b border-slate-800">
         <div>
           <h1 className="text-xl font-semibold text-slate-100 tracking-tight">
-            Konektor CLI Perangkat Aktif (Real TCP/Telnet) & Studio Profil Multi-Vendor
+            Konektor CLI Perangkat Aktif (Mutex Telnet Worker) & Auditor Provisioning
           </h1>
           <p className="text-sm text-slate-400 mt-1">
-            Uji keterjangkauan socket TCP (Telnet/SSH/NETCONF) dan kirim perintah CLI langsung ke OLT aktif atau jalankan di Simulator Lab.
+            Dilengkapi Expect State-Machine (anti-hang prompt/paging), Per-OLT Mutex Queue, dan pendeteksi bug provisioning lintas model ONT.
           </p>
         </div>
 
@@ -453,10 +532,10 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
               <div className="p-3.5 bg-slate-950 border border-slate-800 rounded-lg space-y-3 text-xs">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <span className="font-semibold text-sky-400">
-                    Parameter Socket Perangkat Aktif (Backend Node.js net.Socket)
+                    Parameter Socket Perangkat Aktif (Expect State-Machine + Mutex Queue)
                   </span>
                   <span className="text-slate-400">
-                    Mendukung Telnet (23), SSH Probe (22), NETCONF (830)
+                    Auto-handle --More-- &amp; &#123; &lt;cr&gt; &#125;
                   </span>
                 </div>
 
@@ -474,9 +553,7 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
                     />
                   </div>
                   <div>
-                    <label className="block text-slate-400 mb-1">
-                      Port TCP
-                    </label>
+                    <label className="block text-slate-400 mb-1">Port TCP</label>
                     <input
                       type="number"
                       value={livePort}
@@ -534,7 +611,8 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
                             r.open ? 'text-emerald-400' : 'text-rose-400'
                           }
                         >
-                          Port {r.port}: {r.open ? `${r.latencyMs}ms OPEN` : 'CLOSED'}
+                          Port {r.port}:{' '}
+                          {r.open ? `${r.latencyMs}ms OPEN` : 'CLOSED'}
                         </span>
                       ))}
                     </div>
@@ -565,7 +643,7 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
             </div>
 
             {/* Terminal Viewport */}
-            <div className="bg-slate-950 border border-slate-800 rounded-lg p-4 h-80 overflow-y-auto font-mono text-xs text-slate-200 space-y-1">
+            <div className="bg-slate-950 border border-slate-800 rounded-lg p-4 h-72 overflow-y-auto font-mono text-xs text-slate-200 space-y-1">
               {terminalLines.map((line, idx) => (
                 <div
                   key={idx}
@@ -575,7 +653,8 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
                       : line.startsWith('[OK]') || line.includes('[OPEN]')
                       ? 'text-emerald-400'
                       : line.startsWith('[SOCKET ERROR]') ||
-                        line.startsWith('[ERROR]')
+                        line.startsWith('[ERROR]') ||
+                        line.startsWith('[PERINGATAN')
                       ? 'text-rose-400'
                       : 'text-slate-300 whitespace-pre-wrap'
                   }
@@ -682,7 +761,9 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="block text-slate-400 mb-1">PIR Maks (Mbps)</label>
+                  <label className="block text-slate-400 mb-1">
+                    PIR Maks (Mbps)
+                  </label>
                   <input
                     type="number"
                     value={maxMbps}
@@ -691,7 +772,9 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="block text-slate-400 mb-1">SVLAN / CVLAN</label>
+                  <label className="block text-slate-400 mb-1">
+                    SVLAN / CVLAN
+                  </label>
                   <div className="flex items-center gap-1">
                     <input
                       type="number"
@@ -720,7 +803,7 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
           </div>
 
           {/* Saved Profiles List */}
-          <div className="space-y-2.5 max-h-64 overflow-y-auto pr-1">
+          <div className="space-y-2.5 max-h-60 overflow-y-auto pr-1">
             {profiles.map((prof) => {
               const snippet = compileProfileToMultiVendor(prof);
               return (
@@ -734,7 +817,8 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
                         {prof.name}
                       </span>
                       <span className="text-slate-400 ml-2">
-                        · {prof.category} · CIR {prof.assuredBwMbps}M / PIR {prof.maxBwMbps}M
+                        · {prof.category} · CIR {prof.assuredBwMbps}M / PIR{' '}
+                        {prof.maxBwMbps}M
                       </span>
                     </div>
                     <div className="flex items-center gap-1">
@@ -764,6 +848,125 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
                 </div>
               );
             })}
+          </div>
+        </div>
+      </div>
+
+      {/* Bottom Section: Provisioning Bug Auditor & Per-OLT Mutex Worker Queue Inspector */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+        {/* Left 7 Cols: Provisioning Script Auditor (Fixes flaky ONU provisioning) */}
+        <div className="lg:col-span-7 bg-slate-900/70 border border-slate-800 rounded-lg p-5 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-800">
+            <div>
+              <h2 className="text-sm font-semibold text-slate-100">
+                Auditor Bug Provisioning ONT & Worker Telnet/SNMP
+              </h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Tempelkan potongan skrip provisioning dari repo GitHub Anda yang sering gagal pada beberapa tipe ONT untuk dianalisis penyebabnya.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <select
+                value={auditVendor}
+                onChange={(e) => setAuditVendor(e.target.value as VendorType)}
+                className="px-2.5 py-1.5 text-xs bg-slate-950 border border-slate-700 rounded text-slate-200"
+              >
+                <option value="ZTE">ZTE ZXROS</option>
+                <option value="Huawei">Huawei VRP</option>
+                <option value="FiberHome">FiberHome</option>
+                <option value="Nokia">Nokia ISAM</option>
+              </select>
+              <button
+                onClick={handleAuditProvisionScript}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-sky-600 hover:bg-sky-500 rounded transition-colors whitespace-nowrap"
+              >
+                <Wrench className="w-3.5 h-3.5" />
+                Audit Skrip
+              </button>
+            </div>
+          </div>
+
+          <textarea
+            rows={4}
+            value={scriptToAudit}
+            onChange={(e) => setScriptToAudit(e.target.value)}
+            className="w-full p-3 bg-slate-950 border border-slate-800 rounded-lg font-mono text-xs text-slate-200 focus:outline-none focus:border-sky-500"
+            placeholder="Tempelkan skrip CLI provisioning atau urutan perintah worker Telnet Anda di sini..."
+          />
+
+          <div className="space-y-2.5">
+            {auditIssues.map((issue, i) => (
+              <div
+                key={i}
+                className="p-3.5 bg-slate-950 border border-slate-800 rounded-lg text-xs space-y-1"
+              >
+                <div className="font-semibold text-amber-400">
+                  {i + 1}. {issue.title}
+                </div>
+                <p className="text-slate-400">
+                  <span className="text-slate-200 font-medium">Akar Masalah:</span>{' '}
+                  {issue.cause}
+                </p>
+                <p className="text-emerald-400">
+                  <span className="font-medium">Solusi Perbaikan Worker:</span>{' '}
+                  {issue.fix}
+                </p>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Right 5 Cols: Per-OLT Mutex Worker Queue Log */}
+        <div className="lg:col-span-5 bg-slate-900/70 border border-slate-800 rounded-lg p-5 flex flex-col justify-between space-y-4">
+          <div>
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-100">
+                  Antrean Worker Per-OLT Mutex & SNMP Poller
+                </h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Mencegah tabrakan sesi VTY Telnet antara worker monitoring dan worker provisioning.
+                </p>
+              </div>
+              <button
+                onClick={fetchWorkerStatus}
+                className="p-1.5 text-slate-400 hover:text-white bg-slate-800 rounded"
+                title="Segarkan Status Worker"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            <div className="divide-y divide-slate-800/80 mt-2 text-xs max-h-80 overflow-y-auto">
+              {workerJobs.map((job) => (
+                <div key={job.id} className="py-3 space-y-1">
+                  <div className="flex items-center justify-between font-mono tabular-nums">
+                    <span className="font-semibold text-slate-200">
+                      {job.jobType} · {job.oltHost}
+                    </span>
+                    <span
+                      className={
+                        job.status === 'SUCCESS'
+                          ? 'text-emerald-400'
+                          : job.status === 'RUNNING'
+                          ? 'text-sky-400'
+                          : 'text-rose-400'
+                      }
+                    >
+                      {job.status} ({job.durationMs}ms)
+                    </span>
+                  </div>
+                  <p className="text-slate-400">{job.summary}</p>
+                  {job.errorDetail && (
+                    <p className="text-rose-400 font-mono">{job.errorDetail}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="p-3 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-400">
+            Arsitektur Worker: Setiap IP OLT memiliki <span className="text-slate-200 font-medium">1 Mutex Lock untuk penulisan Telnet</span> dan jalur terpisah untuk <span className="text-slate-200 font-medium">SNMP GETBULK (UDP 161)</span> sehingga proses tarik redaman tidak pernah memutuskan sesi provisioning ONT.
           </div>
         </div>
       </div>
