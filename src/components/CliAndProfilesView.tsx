@@ -6,7 +6,16 @@ import {
   ProvisioningProfile,
   VendorType,
 } from '../types/network';
-import { Terminal, Play, Plus, Trash2, Copy, Check } from 'lucide-react';
+import {
+  Terminal,
+  Play,
+  Plus,
+  Trash2,
+  Copy,
+  Check,
+  Radio,
+  RefreshCw,
+} from 'lucide-react';
 
 interface CliAndProfilesViewProps {
   olts: OltNode[];
@@ -18,6 +27,14 @@ interface CliAndProfilesViewProps {
   onSelectOlt: (oltId: string) => void;
   onAddProfile: (profile: ProvisioningProfile) => void;
   onDeleteProfile: (profileId: string) => void;
+}
+
+interface ProbePortResult {
+  port: number;
+  open: boolean;
+  latencyMs: number | null;
+  banner: string;
+  error?: string;
 }
 
 export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
@@ -32,20 +49,35 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
   onDeleteProfile,
 }) => {
   const activeOlt = olts.find((o) => o.id === selectedOltId) || olts[0];
+  const [terminalMode, setTerminalMode] = useState<'LIVE_HARDWARE' | 'SIMULATOR'>(
+    'LIVE_HARDWARE'
+  );
   const [commandInput, setCommandInput] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
+  // Live Hardware Connection State
+  const [liveHost, setLiveHost] = useState(activeOlt.ipAddress);
+  const [livePort, setLivePort] = useState(23);
+  const [liveUsername, setLiveUsername] = useState('zte');
+  const [livePassword, setLivePassword] = useState('');
+  const [isProbing, setIsProbing] = useState(false);
+  const [isExecutingLive, setIsExecutingLive] = useState(false);
+  const [probeResults, setProbeResults] = useState<ProbePortResult[] | null>(
+    null
+  );
+  const [privateIpNotice, setPrivateIpNotice] = useState<string | null>(null);
+
   const [terminalLines, setTerminalLines] = useState<string[]>([
     `OptiCore Unified Multi-Vendor Telnet/SSH/NETCONF Proxy Gateway`,
-    `Terhubung ke ${activeOlt.name} (${activeOlt.vendor} ${activeOlt.model} - ${activeOlt.ipAddress})`,
-    `Ketik 'help' atau gunakan tombol perintah cepat di atas terminal untuk menjalankan diagnostik OLT.`,
+    `Mode Aktif: Konektor Perangkat OLT Langsung (Real TCP/Telnet Socket Backend)`,
+    `Pilih 'Tes Port TCP' untuk menguji keterjangkauan IP OLT atau kirim perintah CLI langsung ke perangkat.`,
   ]);
 
   // New Profile Form State
   const [profName, setProfName] = useState('DBA-TCONT-300M-GAMING');
   const [profCategory, setProfCategory] =
     useState<ProvisioningProfile['category']>('DBA / T-CONT');
-  const [tcontType, setTcontType] =
+  const [tcontType] =
     useState<ProvisioningProfile['tcontType']>('Type-3 (Assured)');
   const [assuredMbps, setAssuredMbps] = useState(150);
   const [maxMbps, setMaxMbps] = useState(300);
@@ -59,7 +91,135 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
     return `typ:isadmin>#`;
   };
 
-  const executeVendorCommand = (rawCmd: string) => {
+  const handleSelectOltNode = (olt: OltNode) => {
+    onSelectOlt(olt.id);
+    setLiveHost(olt.ipAddress);
+  };
+
+  // Real Backend TCP Probe Handler
+  const handleProbeRealDevice = async () => {
+    if (!liveHost.trim()) return;
+    setIsProbing(true);
+    setProbeResults(null);
+    setPrivateIpNotice(null);
+
+    try {
+      const response = await fetch('/api/olt/probe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          host: liveHost.trim(),
+          ports: [livePort, 23, 22, 830, 80].filter(
+            (v, i, a) => a.indexOf(v) === i
+          ),
+        }),
+      });
+      const data = await response.json();
+      if (data.results) {
+        setProbeResults(data.results);
+        if (data.privateIpWarning) {
+          setPrivateIpNotice(data.privateIpWarning);
+        }
+        const summaryLines = (data.results as ProbePortResult[]).map(
+          (r) =>
+            `  [TCP Port ${String(r.port).padEnd(4)}] -> ${
+              r.open
+                ? `[OPEN] Latency: ${r.latencyMs}ms ${
+                    r.banner ? `| Banner: ${r.banner}` : ''
+                  }`
+                : `[CLOSED/UNREACHABLE] (${r.error || 'Timeout'})`
+            }`
+        );
+        setTerminalLines((prev) => [
+          ...prev,
+          `# Probe Koneksi Socket Nyata ke ${liveHost.trim()}:`,
+          ...summaryLines,
+          ...(data.privateIpWarning ? [`  Catatan: ${data.privateIpWarning}`] : []),
+          '',
+        ]);
+      }
+    } catch (err: any) {
+      setTerminalLines((prev) => [
+        ...prev,
+        `[ERROR] Gagal menghubungi backend gateway: ${err?.message || 'Unknown error'}`,
+      ]);
+    } finally {
+      setIsProbing(false);
+    }
+  };
+
+  // Real Backend Telnet Command Execution Handler
+  const executeLiveTelnetCommand = async (rawCmd: string) => {
+    const cmd = rawCmd.trim();
+    if (!cmd) return;
+
+    setIsExecutingLive(true);
+    setTerminalLines((prev) => [
+      ...prev,
+      `[LIVE SOCKET ${liveHost}:${livePort}]# ${cmd}`,
+      `Menghubungi socket ${liveHost}:${livePort}...`,
+    ]);
+
+    try {
+      const disablePagingCmd =
+        activeOlt.vendor === 'ZTE'
+          ? 'terminal length 0'
+          : activeOlt.vendor === 'Huawei'
+          ? 'screen-length 0 temporary'
+          : '';
+
+      const commandsToSend = disablePagingCmd
+        ? [disablePagingCmd, cmd]
+        : [cmd];
+
+      const response = await fetch('/api/olt/telnet-exec', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          host: liveHost.trim(),
+          port: livePort,
+          username: liveUsername,
+          password: livePassword,
+          commands: commandsToSend,
+          timeoutMs: 7000,
+        }),
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        setTerminalLines((prev) => [
+          ...prev,
+          `[OK] Respons Perangkat Aktif (${data.host}:${data.port}):`,
+          ...String(data.transcript).split('\n'),
+          '',
+        ]);
+      } else {
+        setTerminalLines((prev) => [
+          ...prev,
+          `[SOCKET ERROR] ${data.error || 'Gagal terhubung ke OLT.'}`,
+          ...(data.isPrivateIp
+            ? [
+                `  Info Jaringan: IP ${data.host} adalah IP lokal/private (RFC1918).`,
+                `  Agar dapat terhubung langsung dari Cloud Preview, gunakan IP Publik / Port Forwarding / Tunnel VPN,`,
+                `  atau jalankan aplikasi ini di PC/Server lokal NOC yang berada di satu segmen VLAN Management OLT.`,
+              ]
+            : []),
+          '',
+        ]);
+      }
+    } catch (err: any) {
+      setTerminalLines((prev) => [
+        ...prev,
+        `[ERROR] Eksekusi gagal: ${err?.message || 'Network error'}`,
+      ]);
+    } finally {
+      setIsExecutingLive(false);
+      setCommandInput('');
+    }
+  };
+
+  // Simulator Fallback Handler
+  const executeSimulatorCommand = (rawCmd: string) => {
     const cmd = rawCmd.trim();
     if (!cmd) return;
 
@@ -100,7 +260,7 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
         ),
         `-------------------------------------------------------------------------------`,
       ];
-    } else if (cmd.includes('card') || cmd.includes('board')) {
+    } else if (cmd.includes('card') || cmd.includes('board') || cmd.includes('slot')) {
       output = [
         `--------------------------------------------------------------------`,
         `Slot  Board Type                  Role               Status   Temp`,
@@ -111,7 +271,7 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
         ),
         `--------------------------------------------------------------------`,
       ];
-    } else if (cmd.includes('mac') || cmd.includes('service-port')) {
+    } else if (cmd.includes('mac') || cmd.includes('service-port') || cmd.includes('fdb')) {
       output = [
         `------------------------------------------------------------------------------`,
         `MAC Address        SVLAN  CVLAN  Port/ONU                 IP PPPoE`,
@@ -129,14 +289,21 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
       ];
     } else {
       output = [
-        `Perintah dieksekusi pada ${activeOlt.vendor} (${activeOlt.firmware}):`,
+        `Perintah dieksekusi pada Simulator ${activeOlt.vendor} (${activeOlt.firmware}):`,
         `  Uptime: ${activeOlt.uptime} | CPU: ${activeOlt.cpuLoad}% | Mem: ${activeOlt.memoryLoad}% | Temp: ${activeOlt.chassisTempC}C`,
-        `  Gunakan preset tombol di atas untuk tabel uncfg, optical attenuation, atau service-port.`,
       ];
     }
 
     setTerminalLines((prev) => [...prev, `${prompt} ${cmd}`, ...output, '']);
     setCommandInput('');
+  };
+
+  const handleDispatchCommand = (cmd: string) => {
+    if (terminalMode === 'LIVE_HARDWARE') {
+      executeLiveTelnetCommand(cmd);
+    } else {
+      executeSimulatorCommand(cmd);
+    }
   };
 
   const getQuickCommands = (vendor: VendorType) => {
@@ -219,10 +386,10 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-5 border-b border-slate-800">
         <div>
           <h1 className="text-xl font-semibold text-slate-100 tracking-tight">
-            Terminal CLI Multi-Vendor & Studio Profil Provisioning (DBA / VLAN / OMCI)
+            Konektor CLI Perangkat Aktif (Real TCP/Telnet) & Studio Profil Multi-Vendor
           </h1>
           <p className="text-sm text-slate-400 mt-1">
-            Konsol eksekusi perintah native (ZXROS, Huawei VRP, FiberHome AN6000, Nokia ISAM) dan manajemen profil T-CONT/GEM terpusat.
+            Uji keterjangkauan socket TCP (Telnet/SSH/NETCONF) dan kirim perintah CLI langsung ke OLT aktif atau jalankan di Simulator Lab.
           </p>
         </div>
 
@@ -230,7 +397,7 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
           {olts.map((olt) => (
             <button
               key={olt.id}
-              onClick={() => onSelectOlt(olt.id)}
+              onClick={() => handleSelectOltNode(olt)}
               className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
                 olt.id === activeOlt.id
                   ? 'bg-sky-600 text-white'
@@ -243,34 +410,152 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
         </div>
       </div>
 
-      {/* Main Split: Left Interactive CLI Terminal | Right Cross-Vendor Profile Manager */}
+      {/* Main Split: Left Interactive CLI & Live Hardware Connector | Right Cross-Vendor Profile Manager */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-        {/* Left 7 Cols: Interactive Vendor CLI Console */}
-        <div className="lg:col-span-7 bg-slate-900/70 border border-slate-800 rounded-lg p-5 flex flex-col justify-between">
-          <div>
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <div>
-                <div className="text-xs font-semibold text-sky-400">
-                  Sesi SSH / Telnet Aktif · {activeOlt.vendor} ({activeOlt.firmware})
-                </div>
-                <h2 className="text-sm font-semibold text-slate-100 mt-0.5">
-                  {activeOlt.name} ({activeOlt.ipAddress})
-                </h2>
+        {/* Left 7 Cols: Live Hardware Socket Connector & CLI Console */}
+        <div className="lg:col-span-7 bg-slate-900/70 border border-slate-800 rounded-lg p-5 flex flex-col justify-between space-y-4">
+          <div className="space-y-4">
+            {/* Mode Switcher: Live Hardware vs Lab Simulator */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-1 p-1 bg-slate-950 border border-slate-800 rounded-lg">
+                <button
+                  onClick={() => setTerminalMode('LIVE_HARDWARE')}
+                  className={`px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
+                    terminalMode === 'LIVE_HARDWARE'
+                      ? 'bg-sky-600 text-white'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Koneksi Perangkat OLT Aktif (Live TCP/Telnet)
+                </button>
+                <button
+                  onClick={() => setTerminalMode('SIMULATOR')}
+                  className={`px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
+                    terminalMode === 'SIMULATOR'
+                      ? 'bg-sky-600 text-white'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Mode Simulator Lab ({activeOlt.vendor})
+                </button>
               </div>
+
               <button
                 onClick={() => setTerminalLines([])}
-                className="px-2.5 py-1 text-xs text-slate-400 hover:text-slate-200 bg-slate-800 rounded"
+                className="px-2.5 py-1 text-xs text-slate-400 hover:text-slate-200 bg-slate-800 rounded whitespace-nowrap self-end sm:self-auto"
               >
-                Bersihkan Layar
+                Bersihkan Terminal
               </button>
             </div>
 
+            {/* Live Device Connection Parameters Panel */}
+            {terminalMode === 'LIVE_HARDWARE' && (
+              <div className="p-3.5 bg-slate-950 border border-slate-800 rounded-lg space-y-3 text-xs">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <span className="font-semibold text-sky-400">
+                    Parameter Socket Perangkat Aktif (Backend Node.js net.Socket)
+                  </span>
+                  <span className="text-slate-400">
+                    Mendukung Telnet (23), SSH Probe (22), NETCONF (830)
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+                  <div className="col-span-2">
+                    <label className="block text-slate-400 mb-1">
+                      IP Publik / Host OLT
+                    </label>
+                    <input
+                      type="text"
+                      value={liveHost}
+                      onChange={(e) => setLiveHost(e.target.value)}
+                      placeholder="Mis. 103.x.x.x atau 10.240.12.11"
+                      className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded font-mono text-slate-100"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1">
+                      Port TCP
+                    </label>
+                    <input
+                      type="number"
+                      value={livePort}
+                      onChange={(e) => setLivePort(Number(e.target.value))}
+                      className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded font-mono text-slate-100"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1">
+                      Username OLT
+                    </label>
+                    <input
+                      type="text"
+                      value={liveUsername}
+                      onChange={(e) => setLiveUsername(e.target.value)}
+                      placeholder="zte / root"
+                      className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded font-mono text-slate-100"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1">
+                      Password OLT
+                    </label>
+                    <input
+                      type="password"
+                      value={livePassword}
+                      onChange={(e) => setLivePassword(e.target.value)}
+                      placeholder="••••••••"
+                      className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded font-mono text-slate-100"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={handleProbeRealDevice}
+                    disabled={isProbing}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded transition-colors whitespace-nowrap"
+                  >
+                    <RefreshCw
+                      className={`w-3.5 h-3.5 ${isProbing ? 'animate-spin' : ''}`}
+                    />
+                    {isProbing
+                      ? 'Menguji Socket TCP...'
+                      : `Tes Koneksi & Latency Port ke ${liveHost}`}
+                  </button>
+
+                  {probeResults && (
+                    <div className="flex flex-wrap items-center gap-2 font-mono tabular-nums text-xs">
+                      {probeResults.map((r) => (
+                        <span
+                          key={r.port}
+                          className={
+                            r.open ? 'text-emerald-400' : 'text-rose-400'
+                          }
+                        >
+                          Port {r.port}: {r.open ? `${r.latencyMs}ms OPEN` : 'CLOSED'}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {privateIpNotice && (
+                  <div className="p-2.5 bg-amber-950/50 border border-amber-800/70 rounded text-amber-200 text-xs leading-relaxed">
+                    {privateIpNotice}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Quick Vendor-Authentic Diagnostic Macros */}
-            <div className="flex flex-wrap items-center gap-1.5 my-3">
+            <div className="flex flex-wrap items-center gap-1.5">
               {getQuickCommands(activeOlt.vendor).map((item) => (
                 <button
                   key={item.cmd}
-                  onClick={() => executeVendorCommand(item.cmd)}
+                  onClick={() => handleDispatchCommand(item.cmd)}
+                  disabled={isExecutingLive}
                   className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-mono text-slate-200 bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded transition-colors whitespace-nowrap"
                 >
                   <Play className="w-3 h-3 text-sky-400" />
@@ -280,16 +565,19 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
             </div>
 
             {/* Terminal Viewport */}
-            <div className="bg-slate-950 border border-slate-800 rounded-lg p-4 h-96 overflow-y-auto font-mono text-xs text-slate-200 space-y-1">
+            <div className="bg-slate-950 border border-slate-800 rounded-lg p-4 h-80 overflow-y-auto font-mono text-xs text-slate-200 space-y-1">
               {terminalLines.map((line, idx) => (
                 <div
                   key={idx}
                   className={
                     line.includes('#')
                       ? 'text-sky-400 font-semibold pt-1'
-                      : line.startsWith('[OK]')
+                      : line.startsWith('[OK]') || line.includes('[OPEN]')
                       ? 'text-emerald-400'
-                      : 'text-slate-300 whitespace-pre'
+                      : line.startsWith('[SOCKET ERROR]') ||
+                        line.startsWith('[ERROR]')
+                      ? 'text-rose-400'
+                      : 'text-slate-300 whitespace-pre-wrap'
                   }
                 >
                   {line}
@@ -307,27 +595,34 @@ export const CliAndProfilesView: React.FC<CliAndProfilesViewProps> = ({
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              executeVendorCommand(commandInput);
+              handleDispatchCommand(commandInput);
             }}
             className="mt-3 flex items-center gap-2"
           >
             <div className="flex-1 flex items-center bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 font-mono text-xs">
               <span className="text-sky-400 mr-2 shrink-0">
-                {getPromptPrefix(activeOlt)}
+                {terminalMode === 'LIVE_HARDWARE'
+                  ? `${liveHost}:${livePort}#`
+                  : getPromptPrefix(activeOlt)}
               </span>
               <input
                 type="text"
                 value={commandInput}
                 onChange={(e) => setCommandInput(e.target.value)}
-                placeholder="Ketik perintah CLI OLT (mis. show gpon onu uncfg / display board 0)..."
+                placeholder={
+                  terminalMode === 'LIVE_HARDWARE'
+                    ? 'Ketik perintah CLI untuk dikirim via Live Telnet Socket ke OLT...'
+                    : 'Ketik perintah CLI Simulator (mis. show gpon onu uncfg)...'
+                }
                 className="w-full bg-transparent text-slate-100 focus:outline-none"
               />
             </div>
             <button
               type="submit"
-              className="px-4 py-2 text-xs font-medium text-white bg-sky-600 hover:bg-sky-500 rounded-lg transition-colors whitespace-nowrap shrink-0"
+              disabled={isExecutingLive}
+              className="px-4 py-2 text-xs font-medium text-white bg-sky-600 hover:bg-sky-500 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap shrink-0"
             >
-              Kirim Perintah
+              {isExecutingLive ? 'Mengirim...' : 'Kirim Perintah'}
             </button>
           </form>
         </div>
